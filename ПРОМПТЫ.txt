@@ -62,7 +62,296 @@
 -----------------------------------------------------------------------------------------------------------------------------------------
 
 
+function getBrowserHeight() {
+    return document.compatMode == 'CSS1Compat' && !window.opera ?
+        document.documentElement.clientHeight : document.body.clientHeight;
+}
 
+function getBrowserWidth() {
+    return document.compatMode == 'CSS1Compat' && !window.opera ?
+        document.documentElement.clientWidth : document.body.clientWidth;
+}
+
+Ext.onReady(function () {
+    var win = new Ext.Window({
+        width: 350,
+        height: 185,
+        modal: true,
+        closeAction: 'hide',
+        closable: false,
+        layout: 'form',
+        plain: false,
+        items: [{
+            xtype: 'displayfield',
+            value: '<div style = "font-size: 18px; font-weight: bold; margin-bottom: 10px;">АВТОРИЗАЦИЯ</div>'
+        }, {
+            xtype: 'textfield',
+            fieldLabel: 'Логин',
+            width: 170,
+            id: 'loginField'
+        }, {
+            xtype: 'compositefield',
+            fieldLabel: 'Пароль',
+            items: [
+                {
+                    xtype: 'textfield',
+                    width: 170,
+                    id: 'passwordField',
+                    inputType: 'password',
+                }, {
+                    xtype: 'checkbox',
+                    style: 'margin-left: 5px',
+                    id: 'showPasswordCheckbox',
+                    boxLabel: '',
+                    handler: function (checkbox, checked) {
+                        var passwordField = Ext.getCmp('passwordField');
+                        passwordField.inputType = checked ? 'text' : 'password';
+                        passwordField.setValue(passwordField.getValue());
+                        passwordField.getEl().dom.type = passwordField.inputType;
+                    }
+                }
+            ]
+        }, {
+            xtype: 'component',
+            html: 'br/'
+'
+        }, {
+            xtype: 'container',
+            layout: 'form',
+            items: [{
+                xtype: 'button',
+                text: 'Забыли пароль?',
+                handler: function () {
+                    Ext.Msg.alert('Сообщение', 'Обратитесь в службу поддержки!');
+                },
+                style: {
+                    float: 'right',
+                    marginBottom: '10px',
+                }
+            }]
+        }, {
+            xtype: 'component',
+            html: 'br/'
+'
+        }, {
+            xtype: 'container',
+            layout: 'form',
+            items: [{
+                xtype: 'button',
+                text: 'Вход',
+                width: 280,
+                handler: function () {
+                    var login = Ext.getCmp('loginField').getValue();
+                    var password = Ext.getCmp('passwordField').getValue();
+                    if (login != '' && password != '') {
+                        Ext.Ajax.request({
+                            url: 'phps/auth.php',
+                            method: 'post',
+                            params: {
+                                login: login,
+                                password: password
+                            },
+                            callback: function (opts, suss, resp) {
+                                var result = Ext.decode(resp.responseText);
+                                if (result == 1) {
+                                    var fieldSelectionWin = new Ext.Window({
+                                        //title: 'Вход',
+                                        width: 350,
+                                        height: 160,
+                                        modal: true,
+                                        closeAction: 'hide',
+                                        closable: false,
+                                        layout: 'form',
+                                        plain: false,
+                                        items: [{
+                                            xtype: 'component',
+                                            html: '<div style = "font-size: 14px; margin-bottom: 10px; text-align: center;">Вам доступно несколько ролей. Для продолжения выберите роль из списка<
+
+
+',
+                                            style: {
+                                                textAlign: 'center',
+                                                width: '100%'
+                                            }
+                                        }, {
+                                            xtype: 'container',
+                                            layout: 'form',
+                                            style: {
+                                                textAlign: 'center',
+                                                marginBottom: '10px'
+                                            },
+                                            items: [{
+                                                xtype: 'combo',
+                                                id: 'fieldCombo',
+                                                store: new Ext.data.ArrayStore({
+                                                    fields: ['field'],
+                                                    data: [['Поле1'], ['Поле2'], ['Поле3']]
+                                                }),
+                                                displayField: 'field',
+                                                mode: 'local',
+                                                triggerAction: 'all',
+                                                emptyText: 'Выберите поле...',
+                                                selectOnFocus: true,
+                                                editable: false,
+                                                width: 150,
+                                                style: {
+                                                    margin: '0 auto'
+                                                }
+                                            }]
+                                        }],
+                                        buttons: [{
+                                            text: 'Продолжить',
+                                            handler: function () {
+                                                if (Ext.getCmp('fieldCombo').getValue()) {
+                                                    menu();
+                                                    fieldSelectionWin.close();
+                                                } else {
+                                                    Ext.Msg.alert('Ошибка', 'Не выбрано поле!');
+                                                }
+                                            }
+                                        }, {
+                                            text: 'Отмена',
+                                            handler: function () {
+                                                fieldSelectionWin.close();
+                                            }
+                                        }]
+                                    });
+                                    fieldSelectionWin.show();
+                                } else {
+                                    Ext.Msg.alert('Ошибка', 'Неверные данные!');
+                                }
+                            }
+                        });
+                    } else {
+                        Ext.Msg.alert('Сообщение', 'Заполнены не все поля!');
+                    }
+                },
+                style: {
+                    margin: '0 auto',
+                    //display: 'block'
+                }
+            }]
+        }]
+    });
+    win.show();
+    win.center();
+});
+
+function menu() {
+    var glavnokno = new Ext.Window({
+        width: 800,
+        height: getBrowserHeight() - 5,
+        // title: 'Выберите роль',
+        resizable: false,
+        closeAction: 'hide',
+        closable: false,
+        layout: 'fit',
+        items: [{
+            xtype: 'fieldset',
+            title: 'Работа с чем-то',
+            columnWidth: 2,
+            autoHeight: true,
+            autoWidth: true,
+            style: 'margin:15px; padding-left:10px',
+            items: [{
+                xtype: 'button',
+                text: '<b>90 отдел</b>',
+
+
+textStyle: 'font-weight: bold;',
+                width: 740,
+                height: 60,
+                style: 'margin-bottom: 10px;',
+                handler: function () {
+                    glavnokno.close();
+                }
+            }, {
+                xtype: 'button',
+                text: '<b>90 отдел</b>',
+                textStyle: 'font-weight: bold;',
+                width: 740,
+                height: 60,
+                handler: function () {
+                    glavnokno.close();
+                }
+            }]
+        }, {
+            xtype: 'fieldset',
+            columnWidth: 2,
+            autoHeight: true,
+            autoWidth: true,
+            style: 'margin:15px; padding-left:10px',
+            items: [{
+                xtype: 'button',
+                text: '<b>21(89) отдел</b>',
+                width: 740,
+                height: 100,
+                handler: function () {
+                    glavnokno.close();
+                }
+            }]
+        }]
+    });
+    glavnokno.show();
+}
+
+
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.0 Transitional//EN" "http://www.w3.org/TR/REC-html40/loose.dtd">
+
+<html>
+<head>
+    <title>TECTИК</title>
+
+    <link rel="stylesheet" type="text/css" href="/ext3/resources/css/ext-all.css" />
+    <script type="text/javascript" src="/ext3/adapter/ext/ext-base.js"></script>
+    <script type="text/javascript" src="/ext3/ext-all.js"></script>
+    <link rel="stylesheet" type="text/css" href="css/style.css" />
+    <link rel="stylesheet" type="text/css" href="css/others.css" />
+    <script type="text/javascript" src="js/init.js"></script>
+
+    <script type="text/javascript" src="/ext3/examples/ux/RowExpander.js"></script>
+    <script type="text/javascript" src="/ext3/src/locale/ext-lang-ru.js"></script>
+    <script type="text/javascript" src="/ext3/examples/ux/ProgressBarPager.js"></script>
+    <script type="text/javascript" src="/ext3/examples/ux/PanelResizer.js"></script>
+</head>
+<body>
+    <div id="toolbar"></div>
+    <div id="main"></div>
+</body>
+</html>
+
+
+<?php
+require_once("elah2.php");
+
+//$connectString = "host=pgsqlddb.p33.st port=5432 dbname=main user=scott password=tiger";
+
+//$connect = pg_connect($connectString);
+
+$connect = Connect('ddb');
+
+if (!$connect) {
+    echo "Error";
+    exit;
+}
+$dopusk=0;
+$login = @$_POST['login'];
+$password = @$_POST['password'];
+
+$hash_password = hash('sha256', $password);
+
+$sql = "select count(*) from scott.rust where log = '$login' and pass = '$hash_password'";
+$result = pg_query($connect, $sql);
+$array = pg_fetch_all($result);
+for ($i = 0; $i<count($array); $i++) {
+    $count=$array[$i]['count'];
+    if ($count > 0) {
+        $dopusk=1;
+    }
+}
+
+echo (json_encode($dopusk));
+?>
 
 
 
