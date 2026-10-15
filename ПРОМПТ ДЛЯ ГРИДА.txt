@@ -1,0 +1,6 @@
+ExtJS 3.2.1. Создай Ext.grid.GridPanel.
+Данные берутся через Ext.data.HttpProxy из URL '/api/items.php' (метод POST или иной).
+Поля store: id (int), name (string), created_at (date).
+Колонки: ID (50px), Название (200px), Дата (100px).
+Добавь toolbar сверху с кнопкой "Добавить".
+НЕ добавляй pagination и другие элементы.

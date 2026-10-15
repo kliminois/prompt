@@ -1,0 +1,6 @@
+PHP 7.2 + PostgreSQL
+Напиши эндпоинт /api/items.php:
+- GET: возвращает все записи из таблицы items (id, name, created_at) в формате JSON {success: true, data: [...]}
+- POST: принимает JSON {name: string}, вставляет в БД, возвращает {success: true, id: новый_id}
+Credentials БД задай через константы вверху файла.
+Обработка ошибок: try/catch, при ошибке {success: false, error: 'сообщение'}.
