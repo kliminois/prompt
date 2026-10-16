@@ -23,3 +23,431 @@ fuel-market/
 Понять какие новые таблицы/данные дают
 Составить план на 7 часов
 --------------------------------------------------------------------------------------------------------------------------------------
+
+ПРОГНОЗИРОВАНИЕ
+
+ДОБАВИТЬ В ajax forecast.php    — расчёт прогноза на PHP
+
+<?php
+// Прогнозирование цен методом Хольта-Винтерса.
+// Тройное экспоненциальное сглаживание с сезонностью.
+
+declare(strict_types=1);
+require_once dirname(__DIR__) . '/lib/helpers.php';
+
+$in = read_input(); // fuels, from, to, agg
+
+// Сколько периодов прогнозировать вперёд
+$steps = max(1, min(24, (int)($_GET['steps'] ?? 6)));
+
+// ── 1. Получаем исторические данные ──────────────────────────────
+switch ($in['agg']) {
+    case 'month':
+        $labelExpr = "to_char(date_trunc('month', date_price), 'MM-YYYY')";
+        $sortExpr  = "date_trunc('month', date_price)";
+        $season    = 12; // сезонный период = 12 месяцев
+        break;
+    case 'year':
+        $labelExpr = "to_char(date_trunc('year', date_price), 'YYYY')";
+        $sortExpr  = "date_trunc('year', date_price)";
+        $season    = 4; // минимум для годовой
+        break;
+    default:
+        $labelExpr = "to_char(date_price, 'DD-MM-YYYY')";
+        $sortExpr  = "date_price";
+        $season    = 7; // сезонный период = 7 дней
+}
+
+$priceExpr = $in['agg'] === 'day' ? 'price' : 'AVG(price)';
+$groupBy   = $in['agg'] === 'day'
+    ? ''
+    : 'GROUP BY label, sort_key, fuel_type';
+
+$sql = "SELECT $labelExpr AS label, $sortExpr AS sort_key,
+               fuel_type, $priceExpr AS value
+        FROM fuel_prices
+        WHERE fuel_type = ANY($1)
+          AND date_price BETWEEN $2 AND $3
+        $groupBy
+        ORDER BY sort_key ASC, fuel_type ASC";
+
+$rows = db_query($sql, [
+    '{' . implode(',', $in['fuels']) . '}',
+    $in['from'],
+    $in['to'],
+]);
+
+// ── 2. Раскладываем по видам топлива ─────────────────────────────
+$labelsSet = [];
+foreach ($rows as $r) { $labelsSet[$r['label']] = true; }
+$labels = array_keys($labelsSet);
+$index  = array_flip($labels);
+
+$raw = [];
+foreach ($in['fuels'] as $f) {
+    $raw[$f] = array_fill(0, count($labels), null);
+}
+foreach ($rows as $r) {
+    $raw[$r['fuel_type']][$index[$r['label']]] = (float)$r['value'];
+}
+
+// ── 3. Алгоритм Хольта-Винтерса ──────────────────────────────────
+/**
+ * Тройное экспоненциальное сглаживание (аддитивная модель).
+ *
+ * @param float[] $data   Исторический ряд (без null)
+ * @param int     $m      Сезонный период (7=неделя, 12=год)
+ * @param int     $h      Количество шагов прогноза
+ * @param float   $alpha  Сглаживание уровня    [0..1]
+ * @param float   $beta   Сглаживание тренда    [0..1]
+ * @param float   $gamma  Сглаживание сезонности[0..1]
+ * @return array ['smoothed' => [...], 'forecast' => [...]]
+ */
+function holtWinters(
+    array $data,
+    int   $m     = 12,
+    int   $h     = 6,
+    float $alpha = 0.3,
+    float $beta  = 0.1,
+    float $gamma = 0.2
+): array {
+    $n = count($data);
+
+    // Нужно минимум 2 полных сезона
+    if ($n < $m * 2) {
+        // Fallback на двойное сглаживание (без сезонности)
+        return holtDouble($data, $h, $alpha, $beta);
+    }
+
+    // ── Инициализация ──
+    // Начальный уровень = среднее первого сезона
+    $level = array_sum(array_slice($data, 0, $m)) / $m;
+
+    // Начальный тренд = среднее разностей между сезонами
+    $trend = 0;
+    for ($i = 0; $i < $m; $i++) {
+        $trend += ($data[$i + $m] - $data[$i]) / $m;
+    }
+    $trend /= $m;
+
+    // Начальная сезонность
+    $seasonal = [];
+    $firstAvg = array_sum(array_slice($data, 0, $m)) / $m;
+    for ($i = 0; $i < $m; $i++) {
+        $seasonal[$i] = $data[$i] - $firstAvg;
+    }
+
+    // ── Сглаживание ──
+    $smoothed = [];
+    $L = $level;
+    $T = $trend;
+    $S = $seasonal;
+
+    for ($t = 0; $t < $n; $t++) {
+        $st = $t % $m; // индекс сезонности
+
+        $prevL = $L;
+        $prevT = $T;
+
+        // Обновляем уровень
+        $L = $alpha * ($data[$t] - $S[$st]) + (1 - $alpha) * ($prevL + $prevT);
+        // Обновляем тренд
+        $T = $beta  * ($L - $prevL)          + (1 - $beta)  * $prevT;
+        // Обновляем сезонность
+        $S[$st] = $gamma * ($data[$t] - $L)  + (1 - $gamma) * $S[$st];
+
+        $smoothed[] = round($L + $T + $S[$st], 2);
+    }
+
+    // ── Прогноз на h шагов вперёд ──
+    $forecast = [];
+    for ($i = 1; $i <= $h; $i++) {
+        $st         = ($n + $i - 1) % $m;
+        $forecast[] = round($L + $T * $i + $S[$st], 2);
+    }
+
+    return [
+        'smoothed' => $smoothed,
+        'forecast' => $forecast,
+    ];
+}
+
+/**
+ * Двойное сглаживание Хольта (без сезонности).
+ * Используется когда данных мало (< 2 сезонов).
+ */
+function holtDouble(
+    array $data,
+    int   $h     = 6,
+    float $alpha = 0.3,
+    float $beta  = 0.1
+): array {
+    $n = count($data);
+    $L = $data[0];
+    $T = $data[1] - $data[0];
+
+    $smoothed = [];
+    for ($t = 0; $t < $n; $t++) {
+        $prevL = $L;
+        $L = $alpha * $data[$t] + (1 - $alpha) * ($L + $T);
+        $T = $beta  * ($L - $prevL) + (1 - $beta) * $T;
+        $smoothed[] = round($L + $T, 2);
+    }
+
+    $forecast = [];
+    for ($i = 1; $i <= $h; $i++) {
+        $forecast[] = round($L + $T * $i, 2);
+    }
+
+    return ['smoothed' => $smoothed, 'forecast' => $forecast];
+}
+
+// ── 4. Генерируем метки для прогнозных точек ─────────────────────
+function nextLabels(array $labels, int $steps, string $agg): array {
+    if (empty($labels)) return [];
+
+    $last    = end($labels);
+    $result  = [];
+
+    if ($agg === 'month') {
+        // "10-2024" → следующие месяцы
+        $d = DateTime::createFromFormat('m-Y', $last);
+        for ($i = 1; $i <= $steps; $i++) {
+            $d->modify('+1 month');
+            $result[] = $d->format('m-Y');
+        }
+    } elseif ($agg === 'year') {
+        $year = (int)$last;
+        for ($i = 1; $i <= $steps; $i++) {
+            $result[] = (string)($year + $i);
+        }
+    } else {
+        // "15-10-2024" → следующие дни
+        $d = DateTime::createFromFormat('d-m-Y', $last);
+        for ($i = 1; $i <= $steps; $i++) {
+            $d->modify('+1 day');
+            $result[] = $d->format('d-m-Y');
+        }
+    }
+
+    return $result;
+}
+
+// ── 5. Считаем прогноз для каждого вида топлива ──────────────────
+$results = [];
+
+foreach ($in['fuels'] as $fuel) {
+    $series = array_values(
+        array_filter($raw[$fuel], fn($v) => $v !== null)
+    );
+
+    if (count($series) < 4) {
+        // Слишком мало данных
+        $results[$fuel] = [
+            'smoothed' => [],
+            'forecast' => [],
+            'error'    => 'Недостаточно данных для прогноза',
+        ];
+        continue;
+    }
+
+    $hw = holtWinters($series, $season, $steps);
+
+    $results[$fuel] = [
+        'smoothed' => $hw['smoothed'],
+        'forecast' => $hw['forecast'],
+    ];
+}
+
+$forecastLabels = nextLabels($labels, $steps, $in['agg']);
+
+json_out([
+    'ok'             => true,
+    'labels'         => $labels,
+    'forecastLabels' => $forecastLabels,
+    'steps'          => $steps,
+    'results'        => $results,
+]);
+
+
+
+Добавить в index.php:
+
+<!-- Новая карточка под существующими графиками -->
+<div class="card" id="forecast-card">
+    <div style="display:flex; justify-content:space-between; 
+                align-items:center; margin-bottom:12px;">
+        <h2>Прогноз цен</h2>
+        <div style="display:flex; gap:10px; align-items:center;">
+            <label style="font-size:13px; color:var(--text-muted)">
+                Периодов вперёд:
+            </label>
+            <select id="forecast-steps">
+                <option value="3">3</option>
+                <option value="6" selected>6</option>
+                <option value="12">12</option>
+                <option value="24">24</option>
+            </select>
+            <button id="btn-forecast" onclick="loadForecast()">
+                Построить прогноз
+            </button>
+        </div>
+    </div>
+    <div class="chart-wrap">
+        <canvas id="forecast-chart"></canvas>
+    </div>
+    <p id="forecast-note" 
+       style="font-size:12px; color:var(--text-muted); margin-top:8px;">
+        Метод: тройное экспоненциальное сглаживание (Хольт-Винтерс). 
+        Пунктирная линия — прогноз.
+    </p>
+</div>
+
+добавить в app.js:
+
+let forecastChart = null;
+
+async function loadForecast() {
+    const steps = document.getElementById('forecast-steps').value;
+    const qs    = buildQuery() + '&steps=' + steps;
+    const data  = await getJSON('ajax/forecast.php?' + qs);
+
+    if (!data.ok) {
+        console.error('Ошибка прогноза:', data.error);
+        return;
+    }
+
+    // Объединяем исторические метки + прогнозные
+    const allLabels = [...data.labels, ...data.forecastLabels];
+    const histLen   = data.labels.length;
+
+    const datasets = [];
+
+    state.fuels.forEach(fuel => {
+        const res = data.results[fuel];
+        if (!res || res.error) return;
+
+        const color = colorFor(fuel);
+
+        // Исторический ряд (сплошная линия)
+        const histData = [
+            ...res.smoothed,
+            // Заполняем прогнозную часть null
+            ...Array(data.forecastLabels.length).fill(null),
+        ];
+
+        // Прогнозный ряд (пунктирная линия)
+        // Стыкуем с последней исторической точкой
+        const lastHist = res.smoothed[res.smoothed.length - 1] ?? null;
+        const forecastData = [
+            // Историческую часть заполняем null
+            ...Array(histLen - 1).fill(null),
+            lastHist,  // точка стыка
+            ...res.forecast,
+        ];
+
+        datasets.push({
+            label:           fuel,
+            data:            histData,
+            borderColor:     color,
+            backgroundColor: color,
+            borderWidth:     2,
+            pointRadius:     0,
+            tension:         0.2,
+            spanGaps:        false,
+        });
+
+        datasets.push({
+            label:           fuel + ' (прогноз)',
+            data:            forecastData,
+            borderColor:     color,
+            backgroundColor: color,
+            borderWidth:     2,
+            borderDash:      [6, 4], // пунктир
+            pointRadius:     3,
+            tension:         0.2,
+            spanGaps:        false,
+        });
+    });
+
+    // Вертикальная линия разделения история/прогноз
+    const separatorPlugin = {
+        id: 'separator',
+        afterDraw(chart) {
+            const { ctx, chartArea, scales } = chart;
+            // Находим позицию последней исторической метки
+            const x = scales.x.getPixelForValue(histLen - 1);
+            ctx.save();
+            ctx.beginPath();
+            ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+            ctx.lineWidth   = 1;
+            ctx.setLineDash([4, 4]);
+            ctx.moveTo(x, chartArea.top);
+            ctx.lineTo(x, chartArea.bottom);
+            ctx.stroke();
+            ctx.restore();
+        },
+    };
+
+    if (!forecastChart) {
+        const ctx = document
+            .getElementById('forecast-chart')
+            .getContext('2d');
+
+        forecastChart = new Chart(ctx, {
+            type:    'line',
+            data:    { labels: allLabels, datasets },
+            options: {
+                responsive:          true,
+                maintainAspectRatio: false,
+                interaction: { mode: 'index', intersect: false },
+                plugins: {
+                    legend: {
+                        labels: {
+                            color:  '#e6edf3',
+                            filter: (item) =>
+                                // Скрываем дубли прогнозных из легенды
+                                !item.text.includes('прогноз'),
+                        },
+                    },
+                    tooltip: {
+                        callbacks: {
+                            label: (ctx) => {
+                                const v = ctx.parsed.y;
+                                if (v === null) return null;
+                                const isProg = ctx.dataset.label
+                                    .includes('прогноз');
+                                return `${ctx.dataset.label
+                                    .replace(' (прогноз)', '')}: ` +
+                                    `${v.toFixed(2)} руб.` +
+                                    (isProg ? ' 📈' : '');
+                            },
+                        },
+                    },
+                },
+                scales: {
+                    x: {
+                        ticks: {
+                            color:    '#8b98a5',
+                            autoSkip: true,
+                            maxRotation: 0,
+                        },
+                        grid: { color: 'rgba(255,255,255,0.05)' },
+                    },
+                    y: {
+                        ticks: {
+                            color:    '#8b98a5',
+                            callback: (v) => v.toFixed(2),
+                        },
+                        grid: { color: 'rgba(255,255,255,0.05)' },
+                    },
+                },
+            },
+            plugins: [separatorPlugin],
+        });
+    } else {
+        forecastChart.data.labels   = allLabels;
+        forecastChart.data.datasets = datasets;
+        forecastChart.update();
+    }
+}
